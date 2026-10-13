@@ -11,8 +11,8 @@
 
 ## Kết quả cuối
 
-- `dataset_version` của bạn: `<điền>`  (phải khớp `report/evidence/run_summary.json`)
-- Số khung hình train / val / test của bạn: `<điền>`
+- `dataset_version` của bạn: `59e1ed53d281`  (phải khớp `report/evidence/run_summary.json`)
+- Số khung hình train / val / test của bạn: `764 train / 141 val / 114 test` (tổng 1019 khung hình)
 - `report/verify.txt`: tạo bằng `python3 scripts/check_submission.py --save-verify` (phải có `27/27 checks passed`).
 - Ảnh chụp trong `report/screenshots/`: `airflow_graph.png`, `minio_lake.png`, `metabase_dashboard.png`, và ảnh bài tập sập/chạy lại (log task đỏ thấy trip của bạn).
 
@@ -118,17 +118,49 @@ Bảng số khung trùng theo ngưỡng dHash từ `threshold.json`:
 ### Câu 6
 Dựa vào `leakage.json`: chia theo khung hình làm bao nhiêu trip bị chia cắt, so với chia theo trip? Vì sao điều này làm điểm kiểm thử đẹp một cách giả tạo?
 
-(trả lời ở đây)
+Dựa vào file bằng chứng `leakage.json` (tổng cộng 1019 khung hình sạch thuộc 26 trip):
+- **Chia ngẫu nhiên theo khung hình (per-frame split 70/15/15)**: Toàn bộ **26/26 trip** bị chia cắt trên nhiều split (`per_frame_split_trips_straddling: 26`), và cả **26/26 trip** đều có khung hình xuất hiện đồng thời ở cả tập `train` và tập `test` (`per_frame_split_trips_in_both_train_and_test: 26`).
+- **Chia theo trip (per-trip split của pipeline)**: Có đúng **0 trip** bị chia cắt (`per_trip_split_trips_straddling: 0`). Mỗi trip chỉ thuộc về duy nhất một split (18 trip cho train, 4 trip cho val, 4 trip cho test).
+- **Vì sao điểm kiểm thử đẹp một cách giả tạo (Data Leakage)**:
+  - Video xe tự lái được ghi liên tục với tần số cao (lấy mẫu 2 fps), nghĩa là hai khung hình kề nhau cách nhau chỉ 0.5 giây. Chúng gần như giống hệt nhau về phối cảnh không gian, điều kiện thời tiết, góc chiếu sáng, vạch kẻ đường và hành vi của các phương tiện xung quanh.
+  - Khi chia ngẫu nhiên theo khung hình, khung hình $t$ nằm trong tập `train` còn khung hình $t + 0.5s$ nằm trong tập `test`. Mô hình AI sẽ không học các quy luật tổng quát (generalization) mà chỉ ghi nhớ (memorize) bối cảnh cụ thể của chuyến đi. Khi đánh giá, mô hình thực chất "đã thấy trước đề thi", khiến các chỉ số kiểm thử (loss, accuracy, mAP) cao ngất ngưởng một cách giả tạo. Khi triển khai trên thực tế với cung đường hoàn toàn mới (unseen trips), mô hình sẽ suy giảm độ chính xác nghiêm trọng và tiềm ẩn nguy cơ tai nạn.
 
 ### Câu 7
 Vì sao `dataset_version` là **băm nội dung** chứ không phải ngày giờ hay số đếm? Hai lần chạy liên tiếp cho kết quả gì? Vì sao `dataset_version` của bạn **khác** bạn bè dù cùng dữ liệu (liên hệ MSSV)?
 
-(trả lời ở đây)
+- **Vì sao là băm nội dung (Content Hash)**:
+  - `dataset_version` là chuỗi băm 12 ký tự hex được tính toán trực tiếp từ nội dung dữ liệu (danh sách ID khung hình, phân chia split, nhãn telemetry và metadata manifest).
+  - Điều này đảm bảo tính **tất định (deterministic)** và **tái lập tuyệt đối (reproducibility)**: Bất kỳ ai, chạy ở bất kỳ thời điểm nào hay trên máy chủ nào, nếu dữ liệu đầu vào và logic không đổi thì mã băm sinh ra luôn giống hệt nhau.
+  - Nếu dùng ngày giờ (timestamp) hoặc số đếm tăng dần (counter): mỗi lần chạy lại pipeline (kể cả khi dữ liệu không hề thay đổi) sẽ sinh ra một phiên bản mới, làm rác kho lưu trữ mô hình (Model Registry) và kích hoạt việc huấn luyện lại mô hình tốn kém không cần thiết.
+- **Kết quả hai lần chạy liên tiếp**: Cho ra đúng một `dataset_version` duy nhất không đổi (`59e1ed53d281`).
+- **Vì sao `dataset_version` khác bạn bè dù cùng dữ liệu**:
+  - Pipeline sử dụng `LAB_STUDENT_ID` (MSSV `2A202602467`) làm giá trị "muối" (salt) để băm MD5 khi sắp xếp và phân bổ các trip vào các tập train/val/test.
+  - Do MSSV của mỗi sinh viên là duy nhất, thứ tự phân bổ các trip vào các split là khác nhau giữa các sinh viên. Dẫn tới danh sách khung hình gán cho train, val, test khác nhau, và hash nội dung của dataset cuối cùng (`dataset_version`) là hoàn toàn riêng biệt cho từng người.
 
 ### Câu 8
 Đọc phần `lineage` trong `manifest.json` của dataset bạn. Trả lời "dataset này được tạo từ dữ liệu nào?" bằng chính nội dung đó. Nếu một người hỏi 3 tháng sau, thông tin nào giúp tái tạo lại đúng dataset này?
 
-(trả lời ở đây)
+- **Dataset này được tạo từ những dữ liệu nào (trích xuất từ `manifest.json`)**:
+  - Các bảng Delta upstream và commit version tương ứng:
+    - `bronze.raw_telemetry_a`: version 0
+    - `bronze.raw_telemetry_b`: version 0
+    - `bronze.trips_raw`: version 0
+    - `bronze.video_files`: version 1
+    - `silver.frames`: version 27
+    - `silver.telemetry`: version 0
+    - `silver.frames_flagged`: version 0
+    - `silver.frame_telemetry`: version 0
+  - Hai file video gốc được định danh bất biến qua mã SHA256:
+    - `drive_a`: `636ba1a98dfc5ba665d1c935e1d2064e69f4df360ff9ffbd15795957d5e7e9aa`
+    - `drive_b`: `bfa62703f645ff77a8578ae3fc74a00881140d38a404d43c8e2af265bbee9fdc`
+  - Các quy tắc lọc chất lượng (`rules.drop`): loại bỏ các khung hình `is_black`, `is_blurry`, `is_near_dup`, và `not sync_ok`.
+  - Chiến lược phân chia split: `per trip, stratified by drive, md5 order`.
+
+- **Thông tin giúp tái tạo chính xác dataset này sau 3 tháng**:
+  1. Hai tệp video gốc có đúng mã băm SHA256 như trên.
+  2. Số commit version của từng bảng Delta nguồn (đặc biệt là commit v27 của `silver.frames` và v0 của các bảng telemetry/trips) thông qua tính năng Time Travel của Delta Lake.
+  3. Giá trị MSSV `LAB_STUDENT_ID = 2A202602467` làm salt phân chia split và các tham số lọc chất lượng (ngưỡng dHash = 2, max_gap = 1000ms, sync_tol = 500ms).
+  4. Mã `manifest_sha256 = 120a3da8d92ff0f3183a7622a47f61407e9e2f0fcd5d0c7ddd4994a5282e5d3f` dùng để kiểm chứng toàn vẹn (checksum) tập dữ liệu sau khi tái tạo.
 
 ## Bước 5 · Điều phối và phục vụ
 
