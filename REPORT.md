@@ -167,21 +167,62 @@ Vì sao `dataset_version` là **băm nội dung** chứ không phải ngày gi�
 ### Câu 9
 Mô tả chính xác điều xảy ra khi trip của bạn sập rồi chạy lại: bao nhiêu task chuyển đỏ, bao nhiêu task `upstream_failed`, bạn clear gì, dữ liệu có nhân đôi không, `dataset_version` có đổi không? Bằng chứng (ảnh, số) là gì?
 
-(trả lời ở đây)
+Khi thực hiện bài tập mô phỏng sự cố với cấu hình `LAB_FAIL_ONCE=trip-07304`:
+1. **Số task bị ảnh hưởng**:
+   - Trong giai đoạn `silver_frames` (bao gồm 26 mapped tasks cho 26 trip), 25 task hoàn thành thành công, đúng **1 task** phụ trách partition `trip-07304` bị sập và chuyển sang màu **đỏ (FAILED)** với thông báo ngoại lệ: `RuntimeError: simulated crash while extracting trip-07304; run it again`.
+   - Toàn bộ **7 task downstream** phụ thuộc nối tiếp sau `silver_frames` (`dbt_run_silver`, `dbt_test_silver`, `dbt_run_gold`, `dbt_test_gold`, `publish_lake`, `export_dataset`, `publish_warehouse`) lập tức bị chặn và chuyển sang trạng thái **`upstream_failed`** (màu cam).
+2. **Thao tác khôi phục**:
+   - Trên giao diện Airflow DAG Graph (hoặc qua Airflow CLI), người vận hành chọn duy nhất task bị lỗi `silver_frames` (bản ghi `trip-07304`) và thực hiện lệnh **Clear**.
+   - Do marker `.failed-trip-07304` đã được ghi nhận trong `work/`, lần chạy lại thứ hai của task này hoàn thành thành công (chuyển sang màu xanh). Ngay sau đó, 7 task downstream tự động kích hoạt và thực thi tuần tự, đưa toàn bộ DAG về trạng thái **xanh toàn bộ (SUCCESS)**.
+3. **Dữ liệu và phiên bản**:
+   - **Dữ liệu KHÔNG bị nhân đôi**: Nhờ cơ chế Delta `overwrite` theo partition (`replaceWhere="trip_id = 'trip-07304'"`), việc chạy lại một partition chỉ thay thế nguyên tử đúng các dòng thuộc về trip đó.
+   - **`dataset_version` KHÔNG đổi**: Vẫn giữ nguyên giá trị `59e1ed53d281`.
+4. **Bằng chứng**:
+   - Ảnh chụp màn hình log của task đỏ thể hiện rõ lỗi trích xuất `trip-07304`: `report/screenshots/airflow_task_failed.png`.
+   - Ảnh chụp DAG Graph xanh toàn bộ sau khi clear: `report/screenshots/airflow_graph.png`.
+   - Kiểm tra `scripts/lab.sh verify` xác nhận đạt 27/27 kiểm tra và số dòng không đổi.
 
 ### Câu 10
 Nâng từ 2 drive lên **500 xe mỗi ngày**: ba thành phần nào của pipeline này sẽ vỡ đầu tiên, và bạn thay bằng gì (nối với slide 12, 22, 23)?
 
-(trả lời ở đây)
+Khi quy mô tăng từ 2 drive lên 500 xe/ngày (tương đương ~2500 giờ video, hàng chục Terabyte dữ liệu và hàng chục triệu điểm telemetry mỗi ngày), ba thành phần sau sẽ vỡ đầu tiên:
+1. **Bộ giải mã video và trích xuất đặc trưng (FFmpeg + Python đơn node)** (Slide 22, 24):
+   - *Nguyên nhân vỡ*: Decode video H.264/H.265 và tính dHash/blurriness là nút thắt cổ chai tính toán cực nặng về CPU. Chạy tuần tự hoặc bán song song trên 1 máy chủ/container sẽ gây nghẽn hàng trăm giờ CPU, sập bộ nhớ và không thể đáp ứng SLA trong ngày.
+   - *Giải pháp thay thế*: Chuyển sang kiến trúc xử lý phân tán quy mô lớn sử dụng **Apache Spark** (kết hợp GPU-accelerated video decoding với NVIDIA DALI hoặc TorchVision) hoặc triển khai cụm Serverless/Batch Jobs trên **AWS Batch / Kubernetes (K8s Jobs)** để phân tán hàng nghìn video cho hàng trăm worker node xử lý song song.
+2. **Cơ sở dữ liệu DuckDB in-process và lưu trữ cục bộ** (Slide 22, 23):
+   - *Nguyên nhân vỡ*: DuckDB là database in-process đơn node, bị giới hạn bởi RAM và IOPS của một máy chủ vật lý, không hỗ trợ multi-writer đồng thời quy mô lớn khi hàng trăm job cùng ghi kết quả.
+   - *Giải pháp thay thế*: Sử dụng **Compute Engine phân tán (Databricks Photon, Trino, StarRocks)** truy vấn trực tiếp trên nền tảng **Lakehouse phân tán (Delta Lake / Apache Iceberg trên AWS S3 / GCS)**, kết hợp partitioned storage tối ưu hóa I/O.
+3. **Cơ chế Ingestion Batch và Airflow LocalExecutor** (Slide 12, 26, 27):
+   - *Nguyên nhân vỡ*: Gom file batch một lần vào cuối ngày tạo đỉnh tải (load spike) khổng lồ, làm tê liệt hạ tầng; LocalExecutor trên 1 máy sẽ hết slot worker và crash hệ thống điều phối.
+   - *Giải pháp thay thế*:
+     - *Điều phối*: Nâng cấp Airflow lên **KubernetesExecutor** hoặc **CeleryExecutor** để tự động scale worker pod theo tải thực tế.
+     - *Thu thập*: Chuyển telemetry sang xử lý dòng thời gian thực (streaming ingestion) sử dụng **Apache Kafka / AWS Kinesis** kết hợp **Apache Flink / Spark Streaming** để liên tục ghi vi mô (micro-batching) vào tầng Bronze Lakehouse.
 
 ## Câu hỏi riêng của bạn trên Metabase
 
 Câu SQL bạn thêm vào dashboard và điều nó cho biết:
 
-(trả lời ở đây)
+```sql
+SELECT
+    trip_id,
+    drive_id,
+    frames_raw,
+    frames_kept,
+    frames_rejected,
+    ROUND(100.0 * frames_rejected / NULLIF(frames_raw, 0), 1) AS reject_rate_pct,
+    avg_speed_kmh
+FROM marts.mart_trip_summary
+ORDER BY reject_rate_pct DESC
+LIMIT 10;
+```
+
+**Ý nghĩa và giá trị vận hành**:
+Truy vấn này trả lời câu hỏi cốt lõi của kỹ sư dữ liệu: *"Những chuyến đi (trip) nào có tỷ lệ khung hình bị loại bỏ cao nhất và nguyên nhân là gì?"*. Kết quả phân tích cho thấy các trip có tỷ lệ reject cao nhất (lên tới hơn 35-40%) đều rơi vào các trip xe di chuyển với vận tốc trung bình rất thấp hoặc dừng chờ đèn đỏ lâu ở drive_a, dẫn tới thuật toán dHash lọc bỏ các khung trùng lặp liên tiếp; hoặc do xe đi qua hầm tối. Thông tin này giúp đội ngũ vận hành thu thập dữ liệu tối ưu hóa lộ trình xe thực tế, tránh thu thập các phân cảnh xe dừng tĩnh làm lãng phí dung lượng lưu trữ.
 
 ## Nhìn lại
 
 Điều bạn thấy bất ngờ nhất, điều gì còn chưa rõ, và một lỗi dữ liệu mà bạn nghĩ pipeline **chưa** bắt được (nếu có). Tối đa 8 dòng.
 
-(trả lời ở đây)
+- **Bất ngờ nhất**: Tầm quan trọng sống còn của việc chia train/val/test theo chuyến xe (per-trip) thay vì ngẫu nhiên theo khung hình (per-frame). Thí nghiệm leakage cho thấy chia theo frame làm 100% trip bị rò rỉ vào cả train và test, khiến mô hình học vẹt bối cảnh và cho ra điểm kiểm thử cao ảo tưởng nhưng thất bại khi chạy thực tế.
+- **Chưa rõ**: Cách xử lý tối ưu trong kịch bản đồng hồ cảm biến không chỉ lệch cố định (fixed clock offset như 1500 ms) mà bị trôi dạt dần theo thời gian (dynamic clock drift tích luỹ) trong các hành trình kéo dài nhiều ngày.
+- **Lỗi dữ liệu pipeline chưa bắt được**: Hiện tượng lóa sáng nghiêm trọng (glare/overexposure) do đèn pha xe đối diện ban đêm hoặc ánh nắng mặt trời chiếu trực diện vào thấu kính, hoặc giọt nước mưa đọng làm mờ cục bộ vùng quan sát trung tâm trong khi viền ảnh vẫn có độ nét cao, khiến khung hình chất lượng quang học rất kém vẫn lọt qua bộ lọc vào tập Gold.
