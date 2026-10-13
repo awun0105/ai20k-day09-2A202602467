@@ -79,18 +79,39 @@ Vì sao test `max_gap_ms` là `warn` còn `in_range` là `error`? Kết quả th
 ### Câu 4
 Dựa vào `idempotency.json`: số dòng trước và sau hai lần chạy lại, và khi ghi kiểu `append`. Vì sao Delta `overwrite` theo partition (một trip) an toàn hơn xoá rồi ghi lại, nhất là khi giữa chừng có lỗi?
 
-(trả lời ở đây)
+Dựa vào file bằng chứng `idempotency.json` thu được từ thí nghiệm trên partition `trip-07304`:
+- **Số dòng trước và sau khi chạy lại**: Bảng `silver_frames` ban đầu có 1246 dòng với dấu vân tay (fingerprint) là `6c7480dfde7e`. Sau hai lần chạy lại partition `trip-07304`, tổng số dòng vẫn chính xác là **1246 dòng** và dấu vân tay vẫn là `6c7480dfde7e` (giá trị `unchanged: true`). Điều này chứng minh tính **idempotent**: chạy lại nhiều lần không sinh ra dữ liệu trùng lặp.
+- **Biến thể ghi kiểu `append`**: Partition `trip-07304` có 34 khung hình (`rows_of_trip: 34`). Khi chạy lại 2 lần với phương thức `append`, số dòng của trip bị đội lên thành **68 dòng** (nhân đôi 2x), làm ô nhiễm dữ liệu nghiêm trọng.
+- **Vì sao Delta `overwrite` theo partition an toàn hơn xoá rồi ghi lại (DELETE + INSERT)**:
+  - Delta Lake sử dụng cơ chế transaction log (ACID commitments). Khi thực hiện `overwrite` với điều kiện partition (`replaceWhere="trip_id = 'trip-07304'"`), Delta ghi các file Parquet mới vào storage và thực hiện một commit nguyên tử duy nhất (atomic commit) trong transaction log.
+  - Nếu hệ thống bị sập giữa chừng trong lúc trích xuất hoặc ghi file, transaction chưa commit sẽ bị huỷ bỏ (abort), các file rác bị bỏ qua, và snapshot cũ vẫn còn nguyên vẹn cho downstream reader đọc.
+  - Ngược lại, nếu dùng mô hình xóa trước ghi sau (DELETE rồi INSERT), nếu tiến trình chết giữa chừng sau khi xóa, partition sẽ bị mất trắng dữ liệu (data loss), gây downtime và lỗi dây chuyền cho toàn bộ hệ thống.
 
 ### Câu 5
 Khung hình **đen** và khung hình **tối** khác nhau thế nào, pipeline xử lý khác nhau ra sao, bạn có đồng ý không? Dựa vào `threshold.json`: nếu chọn ngưỡng 0, 2, 6 thì bao nhiêu khung bị coi là trùng ở mỗi drive? Bạn chọn ngưỡng nào, vì sao, và ngưỡng đó phụ thuộc vào tốc độ xe thế nào?
 
+- **Khung đen vs khung tối**:
+  - **Khung hình đen (`is_black`)**: Xảy ra khi camera gặp lỗi phần cứng, mất tín hiệu cảm biến hoặc nắp đậy/vật cản che hoàn toàn ống kính (độ sáng trung bình ~ 0). Khung đen hoàn toàn không mang thông tin thị giác, gây hại cho gradient huấn luyện của mô hình AI, do đó pipeline **loại bỏ hoàn toàn** khỏi tập Gold.
+  - **Khung hình tối (`is_dark` / `toi_giu_lai`)**: Xuất hiện tự nhiên khi xe di chuyển qua đường hầm, hầm chui, bóng râm cây cối hoặc điều kiện thiếu sáng. Khung hình này vẫn chứa các đặc trưng thị giác quan trọng về làn đường, đèn chiếu và vật cản trong điều kiện thực tế. Pipeline **gắn cờ nhận diện nhưng vẫn giữ lại** (drive A có 4 khung, drive B có 61 khung tối được giữ lại).
+  - **Nhận định**: Tôi hoàn toàn đồng ý với cách phân loại này. Xe tự lái bắt buộc phải học cách vận hành an toàn trong điều kiện thiếu sáng; loại bỏ khung tối sẽ tạo ra lỗ hổng tri thức (blind spot) cho mô hình AI khi lái xe ban đêm hoặc trong hầm.
+
+Bảng số khung trùng theo ngưỡng dHash từ `threshold.json`:
+
 | dHash khác tối đa | số khung trùng, drive A | số khung trùng, drive B |
 |---|---|---|
-| 0 | | |
-| 2 | | |
-| 6 | | |
+| 0 | 61 | 8 |
+| 2 | 149 | 53 |
+| 6 | 363 | 244 |
 
-(trả lời ở đây)
+- **Lựa chọn ngưỡng và phân tích**:
+  - Tôi chọn **ngưỡng 2** (như thiết kế của pipeline).
+  - **Lý do**:
+    - Ngưỡng 0 quá khắt khe: chỉ nhận diện trùng khi 64 bit của dHash giống nhau tuyệt đối. Trong thực tế, nhiễu cảm biến camera nhẹ hoặc rung lắc nhỏ khiến 2 khung hình xe đứng yên vẫn lệch 1-2 bit, dẫn đến bỏ sót nhiều khung trùng (chỉ bắt được 61 ở A và 8 ở B).
+    - Ngưỡng 6 quá lỏng: coi sự sai khác tới 6 bit là trùng, loại bỏ tới hơn một nửa dataset (363/602 khung ở A, 244/644 ở B), làm mất đi rất nhiều khung hình có giá trị khi xe đang di chuyển thực sự.
+    - Ngưỡng 2 là điểm cân bằng tối ưu (sweet spot): lọc sạch hiện tượng đứng hình (như lỗi camera đóng băng 6s ở drive A) và các đoạn xe dừng chờ, trong khi không làm mất dữ liệu khi xe di chuyển.
+  - **Sự phụ thuộc vào tốc độ xe**:
+    - Khi xe chạy chậm hoặc dừng chờ (vận tốc thấp/bằng 0): khoảng cách di chuyển giữa hai khung hình lấy mẫu (0.5s ở 2 fps) là rất nhỏ, cảnh vật xung quanh hầu như không thay đổi, dẫn đến khoảng cách dHash rất nhỏ (0 - 2 bit). Do đó drive A (tốc độ chậm) có nhiều khung trùng hơn hẳn drive B.
+    - Khi xe chạy tốc độ cao: quãng đường xe đi được sau 0.5s lớn hơn nhiều, quang cảnh và vạch đường trôi nhanh, khoảng cách dHash giữa các khung hình liên tiếp tăng cao (> 3-4 bit).
 
 ## Bước 4 · Gold
 
