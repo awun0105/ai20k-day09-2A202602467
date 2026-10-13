@@ -4,10 +4,10 @@
 
 | | |
 |---|---|
-| Họ và tên | `<điền>` |
-| MSSV (đúng bằng `LAB_STUDENT_ID` trong `.env`) | `<điền>` |
-| GitHub | `<điền: tên tài khoản>` |
-| Trip dùng cho bài tập sập và chạy lại (xem GUIDE, bước 5) | `<điền: trip-xxxxx>` |
+| Họ và tên | `Lâm Quang Anh Quân` |
+| MSSV (đúng bằng `LAB_STUDENT_ID` trong `.env`) | `2A202602467` |
+| GitHub | `awun0105` |
+| Trip dùng cho bài tập sập và chạy lại (xem GUIDE, bước 5) | `trip-07304` |
 
 ## Kết quả cuối
 
@@ -21,7 +21,15 @@
 ### Câu 1
 Liệt kê **ít nhất 4 khác biệt** giữa telemetry nguồn A và nguồn B mà bạn thấy ở bronze. Vì sao pipeline giữ **mỗi nguồn một bảng bronze** và để mọi cột ở dạng chữ, thay vì gộp và ép kiểu ngay?
 
-(trả lời ở đây)
+Bốn khác biệt lớn giữa telemetry nguồn A và nguồn B được ghi nhận tại lớp Bronze:
+1. **Định dạng timestamp**: Nguồn A dùng chuỗi ISO 8601 UTC (`ts_utc`, ví dụ `2025-10-07T08:00:00.014Z`), trong khi nguồn B dùng Unix epoch tính bằng mili-giây (`timestamp_ms`, ví dụ `1759933801509`).
+2. **Đơn vị và tên cột vận tốc**: Nguồn A dùng `speed_mps` với đơn vị mét/giây (m/s), nguồn B dùng `spd_kmh` với đơn vị kilômét/giờ (km/h).
+3. **Quy ước đặt tên cột và tỷ lệ điều khiển**: Nguồn A dùng `heading_deg`, `lat`, `lon`, `alt_m`, `acc_x`, `acc_y`, bàn đạp `gas`/`brake` dạng tỷ lệ [0..1]; nguồn B dùng `hdg`, `latitude`, `longitude`, `altitude`, `ax`, `ay`, bàn đạp `throttle_pct`/`brake_pct` theo phần trăm [0..100%], góc lái `steering` thay vì `steer`.
+4. **Độ lệch đồng hồ thiết bị (clock offset)**: Nguồn A có độ lệch 0 ms (`telemetry_clock_offset_ms = 0`), còn nguồn B có đồng hồ cảm biến bị lệch 1500 ms so với camera video (`telemetry_clock_offset_ms = 1500`).
+
+Pipeline giữ mỗi nguồn một bảng Bronze riêng và lưu mọi cột dưới dạng văn bản (string/text) thô vì:
+- **Bảo toàn dữ liệu gốc (Fidelity & Audit Trail)**: Theo nguyên lý Medallion (Slide 14), tầng Bronze lưu trữ nguyên vẹn dữ liệu từ nguồn gốc mà không chỉnh sửa, cho phép phục hồi và tính toán lại khi logic tầng Silver thay đổi mà không mất mát thông tin.
+- **Tránh vỡ quá trình Ingestion (Fault Tolerance & Schema Drift)**: Giữ kiểu chữ giúp ingestion luôn thành công dù dữ liệu có null, ký tự rác, hay định dạng bất thường. Việc chuẩn hóa schema, ép kiểu và xử lý dữ liệu bẩn được tách biệt và giao cho tầng Silver (dbt) đảm nhận.
 
 ## Bước 2 · Silver telemetry
 
